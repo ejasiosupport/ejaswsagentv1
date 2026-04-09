@@ -3,6 +3,25 @@ import { supabaseAdmin } from "@/lib/supabase-admin";
 import { sendWhatsAppMessage } from "@/lib/whatsapp";
 import { getAIResponse } from "@/lib/openrouter";
 
+// Rate limiter: max 10 messages per phone per 5 minutes
+const RATE_LIMIT = 10;
+const RATE_WINDOW_MS = 5 * 60 * 1000;
+const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+
+function isRateLimited(phone: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(phone);
+
+  if (!entry || now > entry.resetAt) {
+    rateLimitMap.set(phone, { count: 1, resetAt: now + RATE_WINDOW_MS });
+    return false;
+  }
+
+  entry.count++;
+  if (entry.count > RATE_LIMIT) return true;
+  return false;
+}
+
 // GET /api/webhook — Meta webhook verification
 export async function GET(req: NextRequest) {
   const { searchParams } = req.nextUrl;
@@ -92,6 +111,12 @@ async function processWebhook(body: Record<string, unknown>): Promise<string> {
   // If mode is 'human', stop here — no auto-reply
   if (conversation.mode === "human") return "stored_for_human";
 
+  // Rate limit check
+  if (isRateLimited(phone)) {
+    await sendWhatsAppMessage(phone, "Anda telah menghantar terlalu banyak mesej. Sila tunggu sebentar sebelum menghantar mesej lagi. 🙏");
+    return "rate_limited";
+  }
+
   // Fetch conversation history for AI context
   const { data: history } = await supabaseAdmin
     .from("messages")
@@ -108,8 +133,19 @@ async function processWebhook(body: Record<string, unknown>): Promise<string> {
   // Get AI response
   let aiReply: string;
   try {
-    aiReply = await getAIResponse(aiMessages);
+    aiReply = await getAIResponse(aiMessages, { phone, name: contactName });
     if (!aiReply) throw new Error("Empty AI response");
+    // Strip markdown formatting but keep WhatsApp bold (*word*)
+    aiReply = aiReply.replace(/\*\*([^*]+)\*\*/g, "*$1*") // convert **bold** to *bold* (WhatsApp format)
+      .replace(/_{1,2}([^_]+)_{1,2}/g, "$1") // strip underscores
+      .replace(/^#{1,6}\s/gm, ""); // strip headings
+    // Keep max 1 emoji — remove all after the first
+    const emojiRegex = /\p{Emoji_Presentation}|\p{Extended_Pictographic}/gu;
+    const emojis = aiReply.match(emojiRegex) ?? [];
+    if (emojis.length > 1) {
+      let found = 0;
+      aiReply = aiReply.replace(emojiRegex, (e) => { found++; return found === 1 ? e : ""; });
+    }
   } catch (err) {
     console.error("AI error:", err);
     aiReply = "Sorry, I'm having trouble responding right now. Please try again.";

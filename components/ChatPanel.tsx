@@ -26,11 +26,17 @@ export default function ChatPanel({
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [togglingMode, setTogglingMode] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [localMessages, setLocalMessages] = useState<Message[]>(messages);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    setLocalMessages(messages);
   }, [messages]);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [localMessages]);
 
   async function toggleMode() {
     const newMode = conversation.mode === "agent" ? "human" : "agent";
@@ -46,6 +52,18 @@ export default function ChatPanel({
       }
     } finally {
       setTogglingMode(false);
+    }
+  }
+
+  async function deleteMessage(id: string) {
+    setDeletingId(id);
+    try {
+      const res = await fetch(`/api/messages/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setLocalMessages((prev) => prev.filter((m) => m.id !== id));
+      }
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -73,20 +91,20 @@ export default function ChatPanel({
   const displayName = conversation.name ?? conversation.phone;
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#e5ddd5]">
+    <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#e5ddd5] dark:bg-gray-800">
       {/* Header */}
-      <div className="bg-white px-4 py-3 flex items-center justify-between border-b border-gray-200 shadow-sm">
+      <div className="bg-white dark:bg-gray-900 px-4 py-3 flex items-center justify-between border-b border-gray-200 dark:border-gray-700 shadow-sm">
         <div>
-          <h2 className="font-semibold text-gray-900">{displayName}</h2>
-          <p className="text-xs text-gray-500">{conversation.phone}</p>
+          <h2 className="font-semibold text-gray-900 dark:text-gray-100">{displayName}</h2>
+          <p className="text-xs text-gray-500 dark:text-gray-400">{conversation.phone}</p>
         </div>
         <button
           onClick={toggleMode}
           disabled={togglingMode}
           className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
             conversation.mode === "agent"
-              ? "bg-green-100 text-green-700 hover:bg-green-200"
-              : "bg-orange-100 text-orange-700 hover:bg-orange-200"
+              ? "bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300 hover:bg-green-200 dark:hover:bg-green-800"
+              : "bg-orange-100 dark:bg-orange-900 text-orange-700 dark:text-orange-300 hover:bg-orange-200 dark:hover:bg-orange-800"
           } disabled:opacity-50`}
         >
           <span
@@ -108,33 +126,57 @@ export default function ChatPanel({
             No messages yet
           </p>
         )}
-        {messages.map((msg) => {
+        {localMessages.map((msg) => {
           const isUser = msg.role === "user";
           return (
             <div
               key={msg.id}
-              className={`flex ${isUser ? "justify-start" : "justify-end"}`}
+              className={`flex items-end gap-1 group ${isUser ? "justify-start" : "justify-end"}`}
             >
+              {!isUser && (
+                <button
+                  onClick={() => deleteMessage(msg.id)}
+                  disabled={deletingId === msg.id}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-red-500 p-1 flex-shrink-0 disabled:opacity-30"
+                  title="Delete message"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              )}
               <div
                 className={`max-w-[75%] rounded-2xl px-4 py-2 shadow-sm ${
                   isUser
-                    ? "bg-white text-gray-900 rounded-tl-sm"
-                    : "bg-[#dcf8c6] text-gray-900 rounded-tr-sm"
+                    ? "bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 rounded-tl-sm"
+                    : "bg-[#dcf8c6] dark:bg-green-900 text-gray-900 dark:text-gray-100 rounded-tr-sm"
                 }`}
               >
                 <p className="text-sm whitespace-pre-wrap break-words">
                   {msg.content}
                 </p>
                 <div className="flex items-center justify-end gap-1 mt-1">
-                  <span className="text-xs text-gray-400">
+                  <span className="text-xs text-gray-400 dark:text-gray-500">
                     {isUser ? "User" : "You"}
                   </span>
-                  <span className="text-xs text-gray-400">·</span>
-                  <span className="text-xs text-gray-400">
+                  <span className="text-xs text-gray-400 dark:text-gray-500">·</span>
+                  <span className="text-xs text-gray-400 dark:text-gray-500">
                     {formatTimestamp(msg.created_at)}
                   </span>
                 </div>
               </div>
+              {isUser && (
+                <button
+                  onClick={() => deleteMessage(msg.id)}
+                  disabled={deletingId === msg.id}
+                  className="opacity-0 group-hover:opacity-100 transition-opacity text-gray-400 hover:text-red-500 p-1 flex-shrink-0 disabled:opacity-30"
+                  title="Delete message"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              )}
             </div>
           );
         })}
@@ -144,7 +186,7 @@ export default function ChatPanel({
       {/* Input */}
       <form
         onSubmit={sendMessage}
-        className="bg-white px-4 py-3 border-t border-gray-200 flex items-center gap-3"
+        className="bg-white dark:bg-gray-900 px-4 py-3 border-t border-gray-200 dark:border-gray-700 flex items-center gap-3"
       >
         <input
           type="text"
@@ -155,7 +197,7 @@ export default function ChatPanel({
               ? "Type a reply..."
               : "Send a manual message..."
           }
-          className="flex-1 rounded-full border border-gray-300 px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400"
+          className="flex-1 rounded-full border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-400"
           disabled={sending}
         />
         <button
