@@ -101,11 +101,13 @@ export async function getAIResponse(
     if (choice.finish_reason === "tool_calls" && msg.tool_calls) {
       chatMessages.push(msg);
       for (const tc of msg.tool_calls) {
-        const args = JSON.parse(tc.function.arguments) as Record<string, string>;
-        const result = await handleToolCall(tc.function.name, args);
+        if (!("function" in tc)) continue;
+        const fn = tc.function as { name: string; arguments: string };
+        const args = JSON.parse(fn.arguments) as Record<string, string>;
+        const result = await handleToolCall(fn.name, args);
         chatMessages.push({
           role: "tool",
-          tool_call_id: tc.id,
+          tool_call_id: tc.id as string,
           content: result,
         });
       }
