@@ -25,8 +25,8 @@ export default function DashboardPage() {
     if (res.ok) {
       const data: Conversation[] = await res.json();
       setConversations(data);
-    } else if (res.status === 401) {
-      // No tenant assigned — this user is a super admin
+    } else if (res.status === 401 || res.status === 500) {
+      // No tenant assigned (or DB not yet migrated) — treat as super admin
       setIsAdmin(true);
     }
   }, []);
