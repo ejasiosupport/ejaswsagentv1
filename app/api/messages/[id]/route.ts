@@ -19,7 +19,7 @@ export async function DELETE(
     .eq("id", id)
     .single();
 
-  const tenantId = (msg?.conversations as { tenant_id: string } | null)?.tenant_id;
+  const tenantId = (msg?.conversations as unknown as { tenant_id: string } | null)?.tenant_id;
   if (!msg || tenantId !== session.tenantId) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
