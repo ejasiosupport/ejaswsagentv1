@@ -13,6 +13,7 @@ export default function DashboardPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
   const router = useRouter();
   const { theme, toggle } = useTheme();
 
@@ -24,6 +25,9 @@ export default function DashboardPage() {
     if (res.ok) {
       const data: Conversation[] = await res.json();
       setConversations(data);
+    } else if (res.status === 401) {
+      // No tenant assigned — this user is a super admin
+      setIsAdmin(true);
     }
   }, []);
 
@@ -47,7 +51,6 @@ export default function DashboardPage() {
     }
   }, [selectedId, fetchMessages]);
 
-  // Supabase Realtime — live message updates
   useEffect(() => {
     const channel = supabase
       .channel("messages-realtime")
@@ -105,53 +108,61 @@ export default function DashboardPage() {
 
   if (loading) {
     return (
-      <div className="h-screen flex items-center justify-center bg-gray-100 dark:bg-gray-900">
+      <div className="h-dvh flex items-center justify-center bg-gray-100 dark:bg-gray-900">
         <div className="text-gray-500 dark:text-gray-400 text-sm">Loading conversations...</div>
       </div>
     );
   }
 
   return (
-    <div className="h-screen flex overflow-hidden bg-gray-100 dark:bg-gray-900">
-      <div className="absolute top-3 right-4 z-10 flex items-center gap-2">
-        <button
-          onClick={toggle}
-          className="text-xs text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded px-2 py-1"
-          title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
-        >
-          {theme === "light" ? "🌙 Dark" : "☀️ Light"}
-        </button>
-        <button
-          onClick={handleLogout}
-          className="text-xs text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-100 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded px-2 py-1"
-        >
-          Sign out
-        </button>
+    <div className="h-dvh flex overflow-hidden bg-gray-100 dark:bg-gray-900">
+      {/* Sidebar — full screen on mobile when no conversation selected */}
+      <div
+        className={`${
+          selectedId ? "hidden md:flex" : "flex"
+        } w-full md:w-80 flex-shrink-0 flex-col`}
+      >
+        <ConversationSidebar
+          conversations={conversations}
+          selectedId={selectedId}
+          onSelect={setSelectedId}
+          onDelete={handleConversationDeleted}
+          theme={theme}
+          onToggleTheme={toggle}
+          onLogout={handleLogout}
+          isAdmin={isAdmin}
+        />
       </div>
-      <ConversationSidebar
-        conversations={conversations}
-        selectedId={selectedId}
-        onSelect={setSelectedId}
-        onDelete={handleConversationDeleted}
-      />
-      <main className="flex-1 flex flex-col overflow-hidden">
+
+      {/* Chat panel — full screen on mobile when conversation selected */}
+      <main
+        className={`${
+          selectedId ? "flex" : "hidden md:flex"
+        } flex-1 flex-col overflow-hidden`}
+      >
         {selectedConversation ? (
           <ChatPanel
             conversation={selectedConversation}
             messages={messages}
             onModeChange={handleModeChange}
             onMessageSent={handleMessageSent}
+            onBack={() => setSelectedId(null)}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center bg-[#e5ddd5] dark:bg-gray-800">
             <div className="text-center">
               <div className="text-6xl mb-4">💬</div>
-              <p className="text-gray-600 dark:text-gray-300 font-medium">
-                Select a conversation to start
-              </p>
-              <p className="text-gray-400 dark:text-gray-500 text-sm mt-1">
-                Choose from the list on the left
-              </p>
+              {isAdmin ? (
+                <>
+                  <p className="text-gray-600 dark:text-gray-300 font-medium">You&apos;re logged in as super admin</p>
+                  <p className="text-gray-400 dark:text-gray-500 text-sm mt-1">Use <strong>Manage Clients</strong> to create client accounts</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-gray-600 dark:text-gray-300 font-medium">Select a conversation to start</p>
+                  <p className="text-gray-400 dark:text-gray-500 text-sm mt-1">Choose from the list on the left</p>
+                </>
+              )}
             </div>
           </div>
         )}

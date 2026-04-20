@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import SYSTEM_PROMPT from "./system-prompt";
+import { getBotConfig } from "./bot-config";
 import { getAvailableSlots, bookAppointment } from "./google-calendar";
 
 const client = new OpenAI({
@@ -72,17 +72,26 @@ async function handleToolCall(name: string, args: Record<string, string>): Promi
 
 export async function getAIResponse(
   messages: { role: "user" | "assistant"; content: string }[],
-  caller?: { phone: string; name: string | null }
+  caller?: { phone: string; name: string | null },
+  tenantId?: string
 ): Promise<string> {
-  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kuala_Lumpur" });
-  const todayDisplay = new Date().toLocaleDateString("ms-MY", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "Asia/Kuala_Lumpur" });
+  const config = await getBotConfig(tenantId ?? "default");
+
+  const nowMY = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kuala_Lumpur" }));
+  const today = nowMY.toLocaleDateString("en-CA"); // YYYY-MM-DD
+  const todayDisplay = nowMY.toLocaleDateString("ms-MY", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+
+  const tomorrowMY = new Date(nowMY);
+  tomorrowMY.setDate(tomorrowMY.getDate() + 1);
+  const tomorrow = tomorrowMY.toLocaleDateString("en-CA"); // YYYY-MM-DD
+  const tomorrowDisplay = tomorrowMY.toLocaleDateString("ms-MY", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
 
   const callerInfo = caller
     ? `\n\n## Maklumat Pelanggan\nNombor WhatsApp: ${caller.phone}\nNama: ${caller.name ?? "Tidak diketahui"}\nGuna maklumat ini secara automatik untuk tempahan — JANGAN tanya nombor telefon pelanggan lagi.`
     : "";
 
   const chatMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: `${SYSTEM_PROMPT}\n\n## Tarikh Semasa\nHari ini: ${todayDisplay} (${today})${callerInfo}` },
+    { role: "system", content: `${config.system_prompt}\n\n## Tarikh Semasa\nHari ini: ${todayDisplay} (${today})\nEsok: ${tomorrowDisplay} (${tomorrow})${callerInfo}` },
     ...messages,
   ];
 

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHmac, timingSafeEqual } from "crypto";
 import { supabaseAdmin } from "@/lib/supabase-admin";
 import { sendWhatsAppMessage } from "@/lib/whatsapp";
 import { getAIResponse } from "@/lib/openrouter";
@@ -11,15 +12,24 @@ const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
 function isRateLimited(phone: string): boolean {
   const now = Date.now();
   const entry = rateLimitMap.get(phone);
-
   if (!entry || now > entry.resetAt) {
     rateLimitMap.set(phone, { count: 1, resetAt: now + RATE_WINDOW_MS });
     return false;
   }
-
   entry.count++;
-  if (entry.count > RATE_LIMIT) return true;
-  return false;
+  return entry.count > RATE_LIMIT;
+}
+
+function verifyWebhookSignature(rawBody: string, signatureHeader: string | null): boolean {
+  const secret = process.env.WHATSAPP_APP_SECRET;
+  if (!secret) return true; // skip in dev
+  if (!signatureHeader) return false;
+  const expected = `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+  try {
+    return timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
+  } catch {
+    return false;
+  }
 }
 
 // GET /api/webhook — Meta webhook verification
@@ -37,7 +47,19 @@ export async function GET(req: NextRequest) {
 
 // POST /api/webhook — Receive incoming WhatsApp messages
 export async function POST(req: NextRequest) {
-  const body = await req.json();
+  const rawBody = await req.text();
+  const signature = req.headers.get("x-hub-signature-256");
+
+  if (!verifyWebhookSignature(rawBody, signature)) {
+    return new NextResponse("Unauthorized", { status: 401 });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(rawBody) as Record<string, unknown>;
+  } catch {
+    return new NextResponse("Bad Request", { status: 400 });
+  }
 
   if (body.object !== "whatsapp_business_account") {
     return NextResponse.json({ status: "ignored" });
@@ -72,15 +94,42 @@ async function processWebhook(body: Record<string, unknown>): Promise<string> {
 
   const contacts = value.contacts as Array<Record<string, unknown>> | undefined;
   const contactName =
-    (contacts?.[0]?.profile as Record<string, string> | undefined)?.name ??
-    null;
+    (contacts?.[0]?.profile as Record<string, string> | undefined)?.name ?? null;
 
-  // Upsert conversation
+  // Identify tenant by the WhatsApp phone_number_id in the webhook metadata
+  const metadata = value.metadata as Record<string, string> | undefined;
+  const incomingPhoneNumberId = metadata?.phone_number_id;
+
+  const { data: tenant } = await supabaseAdmin
+    .from("tenants")
+    .select("id, whatsapp_phone_number_id, whatsapp_access_token")
+    .eq("whatsapp_phone_number_id", incomingPhoneNumberId)
+    .single();
+
+  if (!tenant) {
+    console.error("No tenant found for phone_number_id:", incomingPhoneNumberId);
+    return "ignored";
+  }
+
+  // Check for existing conversation (inactivity reset)
+  const { data: existingConv } = await supabaseAdmin
+    .from("conversations")
+    .select("id, updated_at")
+    .eq("phone", phone)
+    .eq("tenant_id", tenant.id)
+    .single();
+
+  const RESET_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
+  const isStaleConversation =
+    existingConv != null &&
+    Date.now() - new Date(existingConv.updated_at).getTime() > RESET_AFTER_MS;
+
+  // Upsert conversation scoped to this tenant
   const { data: conversation, error: convError } = await supabaseAdmin
     .from("conversations")
     .upsert(
-      { phone, name: contactName, updated_at: new Date().toISOString() },
-      { onConflict: "phone", ignoreDuplicates: false }
+      { phone, name: contactName, tenant_id: tenant.id, updated_at: new Date().toISOString() },
+      { onConflict: "phone,tenant_id", ignoreDuplicates: false }
     )
     .select()
     .single();
@@ -90,7 +139,7 @@ async function processWebhook(body: Record<string, unknown>): Promise<string> {
     return "error";
   }
 
-  // Deduplicate: skip if we've already processed this message
+  // Deduplicate
   const { data: existing } = await supabaseAdmin
     .from("messages")
     .select("id")
@@ -108,38 +157,43 @@ async function processWebhook(body: Record<string, unknown>): Promise<string> {
     created_at: new Date(parseInt(timestamp) * 1000).toISOString(),
   });
 
-  // If mode is 'human', stop here — no auto-reply
   if (conversation.mode === "human") return "stored_for_human";
 
-  // Rate limit check
   if (isRateLimited(phone)) {
-    await sendWhatsAppMessage(phone, "Anda telah menghantar terlalu banyak mesej. Sila tunggu sebentar sebelum menghantar mesej lagi. 🙏");
+    await sendWhatsAppMessage(
+      phone,
+      "Anda telah menghantar terlalu banyak mesej. Sila tunggu sebentar sebelum menghantar mesej lagi. 🙏",
+      tenant.whatsapp_phone_number_id,
+      tenant.whatsapp_access_token
+    );
     return "rate_limited";
   }
 
-  // Fetch conversation history for AI context
-  const { data: history } = await supabaseAdmin
-    .from("messages")
-    .select("role, content")
-    .eq("conversation_id", conversation.id)
-    .order("created_at", { ascending: true })
-    .limit(20);
+  // Fetch history (skip if stale)
+  let aiMessages: { role: "user" | "assistant"; content: string }[] = [];
+  if (!isStaleConversation) {
+    const { data: history } = await supabaseAdmin
+      .from("messages")
+      .select("role, content")
+      .eq("conversation_id", conversation.id)
+      .order("created_at", { ascending: true })
+      .limit(20);
 
-  const aiMessages = (history ?? []).map((m) => ({
-    role: m.role as "user" | "assistant",
-    content: m.content as string,
-  }));
+    aiMessages = (history ?? []).map((m) => ({
+      role: m.role as "user" | "assistant",
+      content: m.content as string,
+    }));
+  }
 
-  // Get AI response
+  // Get AI response using this tenant's bot config
   let aiReply: string;
   try {
-    aiReply = await getAIResponse(aiMessages, { phone, name: contactName });
+    aiReply = await getAIResponse(aiMessages, { phone, name: contactName }, tenant.id);
     if (!aiReply) throw new Error("Empty AI response");
-    // Strip markdown formatting but keep WhatsApp bold (*word*)
-    aiReply = aiReply.replace(/\*\*([^*]+)\*\*/g, "*$1*") // convert **bold** to *bold* (WhatsApp format)
-      .replace(/_{1,2}([^_]+)_{1,2}/g, "$1") // strip underscores
-      .replace(/^#{1,6}\s/gm, ""); // strip headings
-    // Keep max 1 emoji — remove all after the first
+    aiReply = aiReply
+      .replace(/\*\*([^*]+)\*\*/g, "*$1*")
+      .replace(/_{1,2}([^_]+)_{1,2}/g, "$1")
+      .replace(/^#{1,6}\s/gm, "");
     const emojiRegex = /\p{Emoji_Presentation}|\p{Extended_Pictographic}/gu;
     const emojis = aiReply.match(emojiRegex) ?? [];
     if (emojis.length > 1) {
@@ -151,17 +205,19 @@ async function processWebhook(body: Record<string, unknown>): Promise<string> {
     aiReply = "Sorry, I'm having trouble responding right now. Please try again.";
   }
 
-  // Send reply via WhatsApp
-  await sendWhatsAppMessage(phone, aiReply);
+  await sendWhatsAppMessage(
+    phone,
+    aiReply,
+    tenant.whatsapp_phone_number_id,
+    tenant.whatsapp_access_token
+  );
 
-  // Store AI response
   await supabaseAdmin.from("messages").insert({
     conversation_id: conversation.id,
     role: "assistant",
     content: aiReply,
   });
 
-  // Update conversation timestamp
   await supabaseAdmin
     .from("conversations")
     .update({ updated_at: new Date().toISOString() })
